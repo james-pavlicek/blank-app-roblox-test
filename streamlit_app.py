@@ -1,15 +1,14 @@
 # app.py
 import re
 import json
-from datetime import datetime, timedelta, timezone
-
 import requests
 import pandas as pd
 import streamlit as st
+import unicodedata
 
 # ---------- Page ----------
-st.set_page_config(page_title="Roblox Game Details + Players Over Time", page_icon="🎮", layout="centered")
-st.title("🎮 Roblox Game Details + Players Over Time")
+st.set_page_config(page_title="Roblox Game Details + Lifetime Estimate", page_icon="🎮", layout="centered")
+st.title("🎮 Roblox Game Details + Lifetime Earnings Estimate")
 
 st.write("Paste a Roblox game URL like:")
 st.code("https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2", language="text")
@@ -19,17 +18,11 @@ url = st.text_input(
     placeholder="https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2",
 )
 
-# ---------- Genre taxonomy from Roblox docs ----------
-# We'll normalize labels so our lookup is robust to casing/punctuation differences.
-import math
-import unicodedata
-import string
-
+# ---------- Genre taxonomy from Roblox docs (L1 + L2) ----------
 def _normalize_label(s: str | None) -> str:
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s).lower()
-    # keep letters/numbers/& and spaces; collapse whitespace
     s = re.sub(r"[^a-z0-9& ]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -53,14 +46,10 @@ GENRE_TAXONOMY = {
     "Survival": ["1 vs All", "Escape"],
     "Utility & other": [],
 }
-# Build a normalized lookup for L1 and L2
-TAXO_NORM = {
-    _normalize_label(k): [_normalize_label(x) for x in v]
-    for k, v in GENRE_TAXONOMY.items()
-}
+# Normalized lookup (not used directly below, but kept in case you extend validation)
+TAXO_NORM = {_normalize_label(k): [_normalize_label(x) for x in v] for k, v in GENRE_TAXONOMY.items()}
 
 # ---------- ARPV (Robux per visit) bands ----------
-# Defaults by L1; L2 inherits unless an override is specified.
 DEFAULT_ARPV_BY_L1 = {
     _normalize_label("Obby & platformer"): (0.05, 0.15, 0.30),
     _normalize_label("Party & casual"):    (0.05, 0.15, 0.30),
@@ -80,7 +69,6 @@ DEFAULT_ARPV_BY_L1 = {
     _normalize_label("Survival"):          (0.20, 0.60, 1.20),
     _normalize_label("Utility & other"):   (0.01, 0.05, 0.10),
 }
-# Optional L2 overrides (use normalized keys)
 L2_OVERRIDES = {
     (_normalize_label("Action"), _normalize_label("Battlegrounds & Fighting")): (0.50, 0.90, 1.50),
     (_normalize_label("Action"), _normalize_label("Music & Rhythm")):           (0.10, 0.30, 0.60),
@@ -115,19 +103,16 @@ L2_OVERRIDES = {
 }
 
 def _arpv_band_for(genre_l1: str | None, genre_l2: str | None):
-    """Return (low, base, high) ARPV by normalized L1/L2 with sensible fallbacks."""
     nl1 = _normalize_label(genre_l1)
     nl2 = _normalize_label(genre_l2)
     if nl1 in DEFAULT_ARPV_BY_L1:
         if nl2 and (nl1, nl2) in L2_OVERRIDES:
             return L2_OVERRIDES[(nl1, nl2)]
         return DEFAULT_ARPV_BY_L1[nl1]
-    # Fallback if unrecognized L1
-    return (0.20, 0.40, 0.80)
+    return (0.20, 0.40, 0.80)  # global fallback
 
 # ---------- Helpers ----------
 def extract_place_id_from_games_url(s: str) -> int | None:
-    """Extract placeId from URLs like /games/{placeId}/..."""
     if not s:
         return None
     m = re.search(r"/games/(\d+)", s)
@@ -135,7 +120,6 @@ def extract_place_id_from_games_url(s: str) -> int | None:
 
 @st.cache_data(ttl=300)
 def get_universe_id(place_id: int) -> dict:
-    """Call place -> universe mapping endpoint. Returns parsed JSON."""
     url = f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
@@ -143,14 +127,12 @@ def get_universe_id(place_id: int) -> dict:
 
 @st.cache_data(ttl=120)
 def get_game_details(universe_id: int) -> dict:
-    """Call games endpoint with universeIds. Returns parsed JSON."""
     url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return r.json()  # {"data":[{...}]}
 
 def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
-    """Flatten the /v1/games response."""
     data = games_json.get("data", [])
     if not isinstance(data, list):
         data = []
@@ -178,7 +160,7 @@ def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
         "genre_l2": "genre_l2",
         "isAllGenre": "isAllGenre",
     }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns])
     preferred_order = [
         "universeId", "rootPlaceId", "name", "description",
         "creator.name", "creator.type", "creator.id",
@@ -191,16 +173,7 @@ def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
     remaining_cols = [c for c in df.columns if c not in ordered_cols]
     return df[ordered_cols + remaining_cols]
 
-def fetch_current_players(universe_id: int) -> int | None:
-    """Returns current 'playing' from /v1/games (snapshot, not historical)."""
-    try:
-        data = get_game_details(universe_id)
-        row = (data.get("data") or [{}])[0]
-        return int(row.get("playing")) if row and row.get("playing") is not None else None
-    except Exception:
-        return None
-
-# ---------- Main: Details ----------
+# ---------- Main ----------
 if st.button("Fetch Game Details", type="primary"):
     place_id = extract_place_id_from_games_url(url)
     if not place_id:
@@ -232,6 +205,10 @@ if st.button("Fetch Game Details", type="primary"):
                     else:
                         st.subheader("Game Details (DataFrame)")
                         st.dataframe(df, use_container_width=True)
+
+                        # Always show raw JSON for transparency
+                        st.subheader("Raw JSON: /v1/games")
+                        st.code(json.dumps(games_resp, indent=2), language="json")
                 except requests.HTTPError as e:
                     st.error(f"Game details fetch failed (HTTP {e.response.status_code}).")
                     with st.expander("Games API raw response"):
@@ -240,22 +217,23 @@ if st.button("Fetch Game Details", type="primary"):
                 except requests.RequestException as e:
                     st.error(f"Network error during game details fetch: {e}")
 
-                # ---------- NEW: Estimated Lifetime Earnings by Genre ----------
+                # ---------- Estimated Lifetime Earnings by Genre ----------
                 if 'df' in locals() and not df.empty:
                     st.markdown("---")
                     st.header("💰 Estimated Lifetime Earnings (ARPV × Visits)")
-                    st.caption(
-                        "We use Roblox's official Genre/Subgenre taxonomy to pick an ARPV (Robux/visit) band. "
-                        "These are heuristic bands — calibrate to your own data for best accuracy."
+
+                    st.info(
+                        "DevEx rate: **$0.0038 per Robux** (=$114 per 30,000 R$), "
+                        "applies to Earned Robux on/after **Sep 5, 2025, 10:00 AM PT**."
                     )
 
+                    # Default (and editable) DevEx rate per your instruction.
                     devex_rate = st.number_input(
-                        "DevEx USD per Robux (optional for USD conversion)",
-                        min_value=0.0, max_value=0.02, value=0.0, step=0.0001, format="%.6f",
-                        help="Leave 0 to show Robux only."
+                        "DevEx USD per Robux",
+                        min_value=0.0, max_value=0.02, value=0.0038, step=0.0001, format="%.6f",
+                        help="Prefilled with the new Roblox DevEx rate. Adjust only if needed."
                     )
 
-                    # Build an estimates table from the details DF
                     est_rows = []
                     for _, row in df.iterrows():
                         visits = int(row.get("visits") or 0)
@@ -275,117 +253,27 @@ if st.button("Fetch Game Details", type="primary"):
                             "est_robux_low": visits * low,
                             "est_robux_base": visits * base,
                             "est_robux_high": visits * high,
+                            "est_usd_low": visits * low * devex_rate,
+                            "est_usd_base": visits * base * devex_rate,
+                            "est_usd_high": visits * high * devex_rate,
                         }
-                        if devex_rate > 0:
-                            est["est_usd_low"] = est["est_robux_low"] * devex_rate
-                            est["est_usd_base"] = est["est_robux_base"] * devex_rate
-                            est["est_usd_high"] = est["est_robux_high"] * devex_rate
                         est_rows.append(est)
 
                     df_est = pd.DataFrame(est_rows)
 
-                    # Order columns for readability
                     cols = [
                         "universeId", "name", "visits", "genre_l1", "genre_l2",
                         "arpv_low", "arpv_base", "arpv_high",
                         "est_robux_low", "est_robux_base", "est_robux_high",
+                        "est_usd_low", "est_usd_base", "est_usd_high",
                     ]
-                    if devex_rate > 0:
-                        cols += ["est_usd_low", "est_usd_base", "est_usd_high"]
 
                     st.subheader("Estimates (per experience)")
                     st.dataframe(df_est[cols], use_container_width=True)
-
-                # ---------- Players Over Time (unchanged) ----------
-                st.markdown("---")
-                st.header("👥 Players Over Time")
-
-                key = f"timeseries_{universe_id}"
-                if key not in st.session_state:
-                    st.session_state[key] = pd.DataFrame(columns=["timestamp", "players"])
-
-                col_a, col_b, col_c = st.columns([1,1,1])
-                with col_a:
-                    window_label = st.selectbox(
-                        "Window",
-                        ["7 days", "14 days", "30 days", "90 days", "1 year"],
-                        index=0,
-                    )
-                with col_b:
-                    auto_sample = st.toggle("Auto-sample every 60s", value=True, help="Collects a datapoint once per minute while this app tab is open.")
-                with col_c:
-                    if st.button("Add datapoint now"):
-                        cur = fetch_current_players(universe_id)
-                        if cur is None:
-                            st.warning("Couldn’t fetch current players right now.")
-                        else:
-                            new_row = {"timestamp": datetime.now(timezone.utc), "players": cur}
-                            st.session_state[key] = pd.concat([st.session_state[key], pd.DataFrame([new_row])], ignore_index=True)
-
-                if auto_sample:
-                    df_ts = st.session_state[key]
-                    should_sample = True
-                    if not df_ts.empty:
-                        last_ts = pd.to_datetime(df_ts["timestamp"]).max()
-                        should_sample = (datetime.now(timezone.utc) - last_ts) >= timedelta(seconds=55)
-                    if should_sample:
-                        cur = fetch_current_players(universe_id)
-                        if cur is not None:
-                            new_row = {"timestamp": datetime.now(timezone.utc), "players": cur}
-                            st.session_state[key] = pd.concat([st.session_state[key], pd.DataFrame([new_row])], ignore_index=True)
-                    # Auto-refresh (same as previous script)
-                    st.experimental_rerun()  # comment out if too aggressive
-
-                df_ts = st.session_state[key].copy()
-                if not df_ts.empty:
-                    df_ts["timestamp"] = pd.to_datetime(df_ts["timestamp"], utc=True)
-                    now = datetime.now(timezone.utc)
-                    days_map = {"7 days":7, "14 days":14, "30 days":30, "90 days":90, "1 year":365}
-                    cutoff = now - timedelta(days=days_map[window_label])
-                    df_win = df_ts[df_ts["timestamp"] >= cutoff].sort_values("timestamp")
-                else:
-                    df_win = df_ts
-
-                st.subheader("Optional: Upload your own history")
-                st.caption("CSV with columns: `timestamp` (ISO8601) and `players` (int).")
-                uploaded = st.file_uploader("Upload CSV", type=["csv"], accept_multiple_files=False)
-                if uploaded is not None:
-                    try:
-                        csv_df = pd.read_csv(uploaded)
-                        csv_df["timestamp"] = pd.to_datetime(csv_df["timestamp"], utc=True, errors="coerce")
-                        csv_df = csv_df.dropna(subset=["timestamp", "players"])
-                        csv_df["players"] = csv_df["players"].astype(int)
-                        merged = pd.concat([st.session_state[key], csv_df], ignore_index=True)
-                        merged = merged.drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
-                        st.session_state[key] = merged
-                        # re-apply window
-                        if not merged.empty:
-                            merged["timestamp"] = pd.to_datetime(merged["timestamp"], utc=True)
-                            df_win = merged[merged["timestamp"] >= cutoff]
-                        st.success("CSV merged into your current time series.")
-                    except Exception as e:
-                        st.error(f"Could not parse CSV: {e}")
-
-                if df_win is None or df_win.empty:
-                    st.info("No datapoints to chart yet. Add one manually, enable auto-sampling, or upload a CSV.")
-                else:
-                    st.line_chart(
-                        df_win.set_index("timestamp")["players"],
-                        use_container_width=True,
-                    )
-
-                if not st.session_state[key].empty:
-                    csv_bytes = st.session_state[key].to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        "Download sampled data (CSV)",
-                        data=csv_bytes,
-                        file_name=f"players_timeseries_{universe_id}.csv",
-                        mime="text/csv",
-                    )
 
 # ---------- Footer ----------
 st.markdown("---")
 st.caption(
     "Flow: URL → placeId → /universes/v1/places/{placeId}/universe → universeId → "
-    "/v1/games?universeIds={universeId} → details + ARPV estimates → (optional) CCU sampling."
+    "/v1/games?universeIds={universeId} → details + ARPV estimates (Robux & USD)."
 )
