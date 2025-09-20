@@ -7,12 +7,9 @@ import streamlit as st
 st.set_page_config(page_title="Roblox Universe ID (Simple)", page_icon="🪐")
 st.title("🪐 Roblox Universe ID (Simple)")
 
-st.write("Paste a Roblox game URL like:")
-st.code("https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2", language="text")
-
 url = st.text_input(
     "Roblox game URL",
-    placeholder="https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2"
+    placeholder="https://www.roblox.com/games/"
 )
 
 def extract_place_id_from_games_url(s: str) -> int | None:
