@@ -8,7 +8,7 @@ import unicodedata
 
 # ---------- Page ----------
 st.set_page_config(page_title="Roblox Game Details + Lifetime Estimate", page_icon="🎮", layout="centered")
-st.title("🎮 Roblox Game Details + Lifetime Earnings Estimate")
+st.title("🎮 Roblox Game Details + Lifetime Earnings Estimate (Robux only)")
 
 st.write("Paste a Roblox game URL like:")
 st.code("https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2", language="text")
@@ -18,7 +18,7 @@ url = st.text_input(
     placeholder="https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2",
 )
 
-# ---------- Genre taxonomy from Roblox docs (L1 + L2) ----------
+# ---------- Genre taxonomy + helpers ----------
 def _normalize_label(s: str | None) -> str:
     if not s:
         return ""
@@ -27,29 +27,6 @@ def _normalize_label(s: str | None) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-GENRE_TAXONOMY = {
-    "Action": ["Battlegrounds & Fighting", "Music & Rhythm", "Open World Action"],
-    "Adventure": ["Exploration", "Scavenger Hunt", "Story"],
-    "Education": [],
-    "Entertainment": ["Music & Audio", "Showcase & Hub", "Video"],
-    "Obby & platformer": ["Classic Obby", "Runner", "Tower Obby"],
-    "Party & casual": ["Childhood Game", "Coloring & Drawing", "Minigame", "Quiz"],
-    "Puzzle": ["Escape Room", "Match & Merge", "Word"],
-    "RPG": ["Action RPG", "Open World & Survival RPG", "Turn-based RPG"],
-    "Roleplay & avatar sim": ["Animal Sim", "Dress Up", "Life", "Morph Roleplay", "Pet Care"],
-    "Shooter": ["Battle Royale", "Deathmatch Shooter", "PvE Shooter"],
-    "Shopping": ["Avatar Shopping"],
-    "Simulation": ["Idle", "Incremental Simulator", "Physics Sim", "Sandbox", "Tycoon", "Vehicle Sim"],
-    "Social": [],
-    "Sports & racing": ["Racing", "Sports"],
-    "Strategy": ["Board & Card Games", "Tower Defense"],
-    "Survival": ["1 vs All", "Escape"],
-    "Utility & other": [],
-}
-# Normalized lookup (not used directly below, but kept in case you extend validation)
-TAXO_NORM = {_normalize_label(k): [_normalize_label(x) for x in v] for k, v in GENRE_TAXONOMY.items()}
-
-# ---------- ARPV (Robux per visit) bands ----------
 DEFAULT_ARPV_BY_L1 = {
     _normalize_label("Obby & platformer"): (0.05, 0.15, 0.30),
     _normalize_label("Party & casual"):    (0.05, 0.15, 0.30),
@@ -69,6 +46,7 @@ DEFAULT_ARPV_BY_L1 = {
     _normalize_label("Survival"):          (0.20, 0.60, 1.20),
     _normalize_label("Utility & other"):   (0.01, 0.05, 0.10),
 }
+
 L2_OVERRIDES = {
     (_normalize_label("Action"), _normalize_label("Battlegrounds & Fighting")): (0.50, 0.90, 1.50),
     (_normalize_label("Action"), _normalize_label("Music & Rhythm")):           (0.10, 0.30, 0.60),
@@ -111,7 +89,10 @@ def _arpv_band_for(genre_l1: str | None, genre_l2: str | None):
         return DEFAULT_ARPV_BY_L1[nl1]
     return (0.20, 0.40, 0.80)  # global fallback
 
-# ---------- Helpers ----------
+def _fmt_robux(x: float) -> str:
+    return f"{x:,.0f} R$"
+
+# ---------- Network helpers ----------
 def extract_place_id_from_games_url(s: str) -> int | None:
     if not s:
         return None
@@ -123,16 +104,16 @@ def get_universe_id(place_id: int) -> dict:
     url = f"https://apis.roblox.com/universes/v1/places/{place_id}/universe"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    return r.json()  # {"universeId": <int>}
+    return r.json()
 
 @st.cache_data(ttl=120)
 def get_game_details(universe_id: int) -> dict:
     url = f"https://games.roblox.com/v1/games?universeIds={universe_id}"
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    return r.json()  # {"data":[{...}]}
+    return r.json()
 
-def to_flat_dataframe(games_json):
+def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
     """Flatten the /v1/games response into a tidy DataFrame."""
     data = games_json.get("data", [])
     if not isinstance(data, list):
@@ -142,7 +123,6 @@ def to_flat_dataframe(games_json):
 
     df = pd.json_normalize(data, sep=".", max_level=2)
 
-    # Map original keys -> desired column names
     rename_map = {
         "id": "universeId",
         "rootPlaceId": "rootPlaceId",
@@ -164,12 +144,9 @@ def to_flat_dataframe(games_json):
         "genre_l2": "genre_l2",
         "isAllGenre": "isAllGenre",
     }
-
-    # Do the rename in two steps (clearer & safer)
     cols_to_rename = {k: v for k, v in rename_map.items() if k in df.columns}
     df = df.rename(columns=cols_to_rename)
 
-    # Order columns for readability (only those that exist)
     preferred_order = [
         "universeId", "rootPlaceId", "name", "description",
         "creator.name", "creator.type", "creator.id",
@@ -212,12 +189,65 @@ if st.button("Fetch Game Details", type="primary"):
                     if df.empty:
                         st.warning("No game data returned for that universeId.")
                     else:
-                        st.subheader("Game Details (DataFrame)")
-                        st.dataframe(df, use_container_width=True)
+                        # Summary (no DataFrame)
+                        row = df.iloc[0].to_dict()
+                        st.subheader("Game Details (summary)")
+                        colA, colB, colC = st.columns(3)
+                        with colA:
+                            st.markdown(f"**Name**: {row.get('name','—')}")
+                            st.markdown(f"**Universe ID**: {row.get('universeId','—')}")
+                            st.markdown(f"**Root Place ID**: {row.get('rootPlaceId','—')}")
+                        with colB:
+                            st.markdown(f"**Genre L1**: {row.get('genre_l1') or row.get('genre') or '—'}")
+                            st.markdown(f"**Genre L2**: {row.get('genre_l2') or '—'}")
+                            st.markdown(f"**Max Players**: {row.get('maxPlayers','—')}")
+                        with colC:
+                            st.markdown(f"**Visits**: {row.get('visits', '—'):,}" if row.get('visits') is not None else "**Visits**: —")
+                            st.markdown(f"**Playing (now)**: {row.get('playing','—')}")
+                            st.markdown(f"**Favorites**: {row.get('favoritedCount','—'):,}" if row.get('favoritedCount') is not None else "**Favorites**: —")
 
-                        # Always show raw JSON for transparency
+                        # ===== MONEY SECTION (moved ABOVE Raw JSON) =====
+                        st.markdown("---")
+                        st.header("💰 Estimated Lifetime Earnings (Robux only)")
+                        st.caption("Computed as: visits × ARPV (low/base/high) based on Genre L1/L2.")
+                        estimates = []
+                        for _, r in df.iterrows():
+                            visits = int(r.get("visits") or 0)
+                            l1 = r.get("genre_l1") or r.get("genre") or ""
+                            l2 = r.get("genre_l2") or ""
+                            low, base, high = _arpv_band_for(l1, l2)
+                            estimates.append({
+                                "name": r.get("name", "Experience"),
+                                "visits": visits,
+                                "genre_l1": l1,
+                                "genre_l2": l2,
+                                "low": visits * low,
+                                "base": visits * base,
+                                "high": visits * high,
+                                "low_arpv": low,
+                                "base_arpv": base,
+                                "high_arpv": high,
+                            })
+                        for est in estimates:
+                            st.subheader(est["name"])
+                            st.markdown(
+                                f"**Genre**: {est['genre_l1'] or '—'}"
+                                + (f" ▸ {est['genre_l2']}" if est['genre_l2'] else "")
+                                + f"  |  **Visits**: {est['visits']:,}"
+                            )
+                            c1, c2, c3 = st.columns(3)
+                            with c1:
+                                st.metric("Low", _fmt_robux(est["low"]), help=f"ARPV={est['low_arpv']}")
+                            with c2:
+                                st.metric("Base", _fmt_robux(est["base"]), help=f"ARPV={est['base_arpv']}")
+                            with c3:
+                                st.metric("High", _fmt_robux(est["high"]), help=f"ARPV={est['high_arpv']}")
+
+                        # ===== Raw JSON AFTER money =====
+                        st.markdown("---")
                         st.subheader("Raw JSON: /v1/games")
                         st.code(json.dumps(games_resp, indent=2), language="json")
+
                 except requests.HTTPError as e:
                     st.error(f"Game details fetch failed (HTTP {e.response.status_code}).")
                     with st.expander("Games API raw response"):
@@ -226,63 +256,9 @@ if st.button("Fetch Game Details", type="primary"):
                 except requests.RequestException as e:
                     st.error(f"Network error during game details fetch: {e}")
 
-                # ---------- Estimated Lifetime Earnings by Genre ----------
-                if 'df' in locals() and not df.empty:
-                    st.markdown("---")
-                    st.header("💰 Estimated Lifetime Earnings (ARPV × Visits)")
-
-                    st.info(
-                        "DevEx rate: **$0.0038 per Robux** (=$114 per 30,000 R$), "
-                        "applies to Earned Robux on/after **Sep 5, 2025, 10:00 AM PT**."
-                    )
-
-                    # Default (and editable) DevEx rate per your instruction.
-                    devex_rate = st.number_input(
-                        "DevEx USD per Robux",
-                        min_value=0.0, max_value=0.02, value=0.0038, step=0.0001, format="%.6f",
-                        help="Prefilled with the new Roblox DevEx rate. Adjust only if needed."
-                    )
-
-                    est_rows = []
-                    for _, row in df.iterrows():
-                        visits = int(row.get("visits") or 0)
-                        l1 = row.get("genre_l1") or row.get("genre") or ""
-                        l2 = row.get("genre_l2") or ""
-                        low, base, high = _arpv_band_for(l1, l2)
-
-                        est = {
-                            "universeId": row.get("universeId"),
-                            "name": row.get("name"),
-                            "visits": visits,
-                            "genre_l1": l1,
-                            "genre_l2": l2,
-                            "arpv_low": low,
-                            "arpv_base": base,
-                            "arpv_high": high,
-                            "est_robux_low": visits * low,
-                            "est_robux_base": visits * base,
-                            "est_robux_high": visits * high,
-                            "est_usd_low": visits * low * devex_rate,
-                            "est_usd_base": visits * base * devex_rate,
-                            "est_usd_high": visits * high * devex_rate,
-                        }
-                        est_rows.append(est)
-
-                    df_est = pd.DataFrame(est_rows)
-
-                    cols = [
-                        "universeId", "name", "visits", "genre_l1", "genre_l2",
-                        "arpv_low", "arpv_base", "arpv_high",
-                        "est_robux_low", "est_robux_base", "est_robux_high",
-                        "est_usd_low", "est_usd_base", "est_usd_high",
-                    ]
-
-                    st.subheader("Estimates (per experience)")
-                    st.dataframe(df_est[cols], use_container_width=True)
-
 # ---------- Footer ----------
 st.markdown("---")
 st.caption(
     "Flow: URL → placeId → /universes/v1/places/{placeId}/universe → universeId → "
-    "/v1/games?universeIds={universeId} → details + ARPV estimates (Robux & USD)."
+    "/v1/games?universeIds={universeId} → Robux-only lifetime estimate using ARPV bands."
 )
