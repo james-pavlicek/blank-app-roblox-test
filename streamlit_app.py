@@ -6,19 +6,21 @@ import pandas as pd
 import streamlit as st
 import unicodedata
 
+# ---------- Config ----------
+DEVEX_RATE_USD_PER_R = 0.0038  # Fixed conversion: $0.0038 per Robux
+L1_WEIGHT = 0.70               # 70% L1, 30% L2 when both exist
+
 # ---------- Page ----------
 st.set_page_config(page_title="Roblox Game Details + Lifetime Estimate", page_icon="🎮", layout="centered")
-st.title("🎮 Roblox Game Details + Lifetime Earnings Estimate (Robux only)")
+st.title("🎮 Roblox Game Details + Lifetime Earnings Estimate (USD + Robux)")
 
-st.write("Paste a Roblox game URL like:")
-st.code("https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2", language="text")
 
 url = st.text_input(
     "Roblox game URL",
-    placeholder="https://www.roblox.com/games/76059555697165/Slimera-BETA-1-2",
+    placeholder="https://www.roblox.com/games/",
 )
 
-# ---------- Genre taxonomy + helpers ----------
+# ---------- Genre helpers ----------
 def _normalize_label(s: str | None) -> str:
     if not s:
         return ""
@@ -80,17 +82,47 @@ L2_OVERRIDES = {
     (_normalize_label("Survival"), _normalize_label("Escape")):                 (0.20, 0.60, 1.20),
 }
 
+def _mean_band_of_all_l1():
+    vals = list(DEFAULT_ARPV_BY_L1.values())
+    if not vals:
+        return (0.20, 0.40, 0.80)
+    lows  = sum(v[0] for v in vals) / len(vals)
+    bases = sum(v[1] for v in vals) / len(vals)
+    highs = sum(v[2] for v in vals) / len(vals)
+    return (lows, bases, highs)
+
+MEAN_BAND_ALL_L1 = _mean_band_of_all_l1()
+
+def _mix_bands(b1, b2, w_l1=L1_WEIGHT):
+    """Weighted blend of two (low, base, high) tuples: w*L1 + (1-w)*L2."""
+    w_l2 = 1.0 - w_l1
+    return (w_l1*b1[0] + w_l2*b2[0],
+            w_l1*b1[1] + w_l2*b2[1],
+            w_l1*b1[2] + w_l2*b2[2])
+
 def _arpv_band_for(genre_l1: str | None, genre_l2: str | None):
+    """
+    Returns a (low, base, high) ARPV band using:
+      - 70% L1 + 30% L2 if both exist (and L2 override exists)
+      - 100% L1 if only L1 exists
+      - average of all L1 bands if neither recognized
+    """
     nl1 = _normalize_label(genre_l1)
     nl2 = _normalize_label(genre_l2)
     if nl1 in DEFAULT_ARPV_BY_L1:
-        if nl2 and (nl1, nl2) in L2_OVERRIDES:
-            return L2_OVERRIDES[(nl1, nl2)]
-        return DEFAULT_ARPV_BY_L1[nl1]
-    return (0.20, 0.40, 0.80)  # global fallback
+        l1_band = DEFAULT_ARPV_BY_L1[nl1]
+        l2_band = L2_OVERRIDES.get((nl1, nl2))
+        if l2_band:
+            return _mix_bands(l1_band, l2_band, w_l1=L1_WEIGHT)  # 70% L1 + 30% L2
+        return l1_band  # 100% L1
+    # No L1 (or unrecognized): use average of all L1s
+    return MEAN_BAND_ALL_L1
 
 def _fmt_robux(x: float) -> str:
     return f"{x:,.0f} R$"
+
+def _fmt_usd(x: float) -> str:
+    return f"${x:,.2f}"
 
 # ---------- Network helpers ----------
 def extract_place_id_from_games_url(s: str) -> int | None:
@@ -206,28 +238,32 @@ if st.button("Fetch Game Details", type="primary"):
                             st.markdown(f"**Playing (now)**: {row.get('playing','—')}")
                             st.markdown(f"**Favorites**: {row.get('favoritedCount','—'):,}" if row.get('favoritedCount') is not None else "**Favorites**: —")
 
-                        # ===== MONEY SECTION (moved ABOVE Raw JSON) =====
+                        # ===== MONEY (USD primary, Robux below) =====
                         st.markdown("---")
-                        st.header("💰 Estimated Lifetime Earnings (Robux only)")
-                        st.caption("Computed as: visits × ARPV (low/base/high) based on Genre L1/L2.")
+                        st.header("💰 Estimated Lifetime Earnings")
+                        st.caption("Computed as: visits × blended ARPV (70% L1 + 30% L2 if available; else 100% L1; else average of all L1 bands). Converted at $0.0038/R$.")
                         estimates = []
                         for _, r in df.iterrows():
                             visits = int(r.get("visits") or 0)
                             l1 = r.get("genre_l1") or r.get("genre") or ""
                             l2 = r.get("genre_l2") or ""
-                            low, base, high = _arpv_band_for(l1, l2)
+                            low_rpv, base_rpv, high_rpv = _arpv_band_for(l1, l2)
+                            low_r = visits * low_rpv
+                            base_r = visits * base_rpv
+                            high_r = visits * high_rpv
                             estimates.append({
                                 "name": r.get("name", "Experience"),
                                 "visits": visits,
                                 "genre_l1": l1,
                                 "genre_l2": l2,
-                                "low": visits * low,
-                                "base": visits * base,
-                                "high": visits * high,
-                                "low_arpv": low,
-                                "base_arpv": base,
-                                "high_arpv": high,
+                                "low_usd": low_r * DEVEX_RATE_USD_PER_R,
+                                "base_usd": base_r * DEVEX_RATE_USD_PER_R,
+                                "high_usd": high_r * DEVEX_RATE_USD_PER_R,
+                                "low_r": low_r,
+                                "base_r": base_r,
+                                "high_r": high_r,
                             })
+
                         for est in estimates:
                             st.subheader(est["name"])
                             st.markdown(
@@ -237,11 +273,14 @@ if st.button("Fetch Game Details", type="primary"):
                             )
                             c1, c2, c3 = st.columns(3)
                             with c1:
-                                st.metric("Low", _fmt_robux(est["low"]), help=f"ARPV={est['low_arpv']}")
+                                st.metric("Low", _fmt_usd(est["low_usd"]))
+                                st.caption(_fmt_robux(est["low_r"]))
                             with c2:
-                                st.metric("Base", _fmt_robux(est["base"]), help=f"ARPV={est['base_arpv']}")
+                                st.metric("Base", _fmt_usd(est["base_usd"]))
+                                st.caption(_fmt_robux(est["base_r"]))
                             with c3:
-                                st.metric("High", _fmt_robux(est["high"]), help=f"ARPV={est['high_arpv']}")
+                                st.metric("High", _fmt_usd(est["high_usd"]))
+                                st.caption(_fmt_robux(est["high_r"]))
 
                         # ===== Raw JSON AFTER money =====
                         st.markdown("---")
@@ -260,5 +299,5 @@ if st.button("Fetch Game Details", type="primary"):
 st.markdown("---")
 st.caption(
     "Flow: URL → placeId → /universes/v1/places/{placeId}/universe → universeId → "
-    "/v1/games?universeIds={universeId} → Robux-only lifetime estimate using ARPV bands."
+    "/v1/games?universeIds={universeId} → USD estimate (Robux shown below)."
 )
