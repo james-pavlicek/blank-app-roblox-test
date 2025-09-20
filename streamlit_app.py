@@ -132,13 +132,17 @@ def get_game_details(universe_id: int) -> dict:
     r.raise_for_status()
     return r.json()  # {"data":[{...}]}
 
-def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
+def to_flat_dataframe(games_json):
+    """Flatten the /v1/games response into a tidy DataFrame."""
     data = games_json.get("data", [])
     if not isinstance(data, list):
         data = []
     if not data:
         return pd.DataFrame()
+
     df = pd.json_normalize(data, sep=".", max_level=2)
+
+    # Map original keys -> desired column names
     rename_map = {
         "id": "universeId",
         "rootPlaceId": "rootPlaceId",
@@ -160,7 +164,12 @@ def to_flat_dataframe(games_json: dict) -> pd.DataFrame:
         "genre_l2": "genre_l2",
         "isAllGenre": "isAllGenre",
     }
-    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns])
+
+    # Do the rename in two steps (clearer & safer)
+    cols_to_rename = {k: v for k, v in rename_map.items() if k in df.columns}
+    df = df.rename(columns=cols_to_rename)
+
+    # Order columns for readability (only those that exist)
     preferred_order = [
         "universeId", "rootPlaceId", "name", "description",
         "creator.name", "creator.type", "creator.id",
